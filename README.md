@@ -1,111 +1,58 @@
-# Dropbox Server - Phase 1
+# OS Lab Project 2: Dropbox Clone
 
-A multi-threaded file storage server implementation supporting user authentication and basic file operations.
+This project implements a multi-threaded file server with per-user accounts, file operations, and fine-grained concurrency control.
 
-## Project Structure
+## How to Compile
 
-dropbox_server/
-├── server.c # Main server implementation
-├── client.c # Client implementation
-├── queue.h/.c # Thread-safe queue implementation
-├── threadpool.h/.c # Thread pool management
-├── user_auth.h/.c # User authentication and management
-├── file_ops.h/.c # File operations (upload/download/delete/list)
-├── Makefile # Build configuration
-├── test_phase1.sh # Automated test script
-└── user_files/ # Server storage directory (auto-created)
+A `Makefile` is provided. Simply run:
 
-## Build Instructions
-
-### Prerequisites
-- GCC compiler
-- POSIX threads (pthreads)
-- Linux environment
-
-### Compilation
-```bash
-# Build both server and client
 make
 
-# Or build manually
-gcc -pthread -o dropbox_server server.c queue.c threadpool.c user_auth.c file_ops.c
-gcc -o dropbox_client client.c
+This will create two executables: dropbox_server and dropbox_client.
 
-make clean
-
+How to Run the Server
 ./dropbox_server
 
+How to Run the Client
+In a new terminal, run:
 ./dropbox_client
 
-Available Commands
+How to Test for Correctness
 
-    SIGNUP <username> <password> - Create new user account
+The Makefile includes rules for running the server with Valgrind (for memory leaks) and ThreadSanitizer (for data races).
 
-    LOGIN <username> <password> - Authenticate user
+1. Test for Memory Leaks (Valgrind)
 
-    UPLOAD <local_file> <server_file> - Upload file to server
+This command cleans, builds, and runs the server inside Valgrind.
+make memcheck
 
-    DOWNLOAD <server_file> - Download file from server
+After connecting with clients and running commands, shut down the server with Ctrl+C. The output should show "0 errors from 0 contexts" and "All heap blocks were freed".
 
-    DELETE <server_file> - Delete file from server
+2. Test for Data Races (ThreadSanitizer)
 
-    LIST - List user's files and quota usage
+This command cleans, builds, and runs the server with ThreadSanitizer enabled.
+make racecheck
 
-    QUIT - Close connection
+While the server is running, you can perform the concurrency test.
 
-Automated Test
+3. Manual Concurrency Test (Instructions)
 
-  ./test_phase1.sh
+This test demonstrates the per-file locking mechanism.
 
-Manual Test Sequence
+    Start the server with make racecheck.
 
-    Start server: ./dropbox_server
+    Open Terminal A and run ./dropbox_client.
 
-    Run client: ./dropbox_client
+    Open Terminal B and run ./dropbox_client.
 
-    Execute commands:
+    In Terminal A: SIGNUP test 123
 
-SIGNUP user1 pass123
-LOGIN user1 pass123
-UPLOAD test.txt test.txt
-LIST
-DOWNLOAD test.txt
-DELETE test.txt
-LIST
-QUIT
+    In Terminal A: LOGIN test 123
 
-Memory Leak Check
+    In Terminal B: LOGIN test 123
 
-valgrind --leak-check=full ./dropbox_server
+    In Terminal A: UPLOAD my_file.txt dummy.txt (This will pause for 5 sec due to the debug sleep).
 
-Architecture
+    In Terminal B (quickly): DELETE my_file.txt
 
-    Main Thread: Accepts incoming connections
-
-    Client Thread Pool: Handles authentication and command parsing
-
-    Worker Thread Pool: Executes file operations
-
-    Thread-safe Queues: Client queue and task queue
-
-    Per-user Storage: Isolated file storage with quota management
-
-File Storage
-
-User files are stored in user_files/<username>/ directory. Each user gets:
-
-    10MB default storage quota
-
-    Individual file tracking
-
-    Thread-safe access control
-
-Limitations (Phase 1)
-
-    Single session per user supported
-
-    Basic error handling
-
-    In-memory user metadata (not persistent)
-
-    No file conflict resolution for multiple clients
+Expected Result: The DELETE command in Terminal B will hang until the UPLOAD in Terminal A completes, proving the per-file lock is working. The server will not crash and not report a "DATA RACE" warning.

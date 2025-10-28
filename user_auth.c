@@ -2,7 +2,7 @@
 #include <string.h>
 #include <pthread.h>
 #include <stdlib.h>
-#include "user_auth.h"
+#include "common.h"
 
 UserManager* user_manager_create() {
     UserManager *manager = (UserManager*)malloc(sizeof(UserManager));
@@ -44,7 +44,9 @@ int user_signup(UserManager *manager, const char *username, const char *password
     
     User *new_user = &manager->users[manager->user_count];
     strncpy(new_user->username, username, MAX_USERNAME_LEN - 1);
+    new_user->username[MAX_USERNAME_LEN - 1] = '\0';
     strncpy(new_user->password, password, MAX_PASSWORD_LEN - 1);
+    new_user->password[MAX_PASSWORD_LEN - 1] = '\0';
     new_user->file_count = 0;
     new_user->used_quota = 0;
     new_user->quota = DEFAULT_QUOTA;

@@ -6,7 +6,7 @@
 #include <sys/socket.h>
 #include <pthread.h>
 #include <fcntl.h>
-#include "file_ops.h"
+#include "common.h"
 
 #define STORAGE_DIR "./user_files/"
 
@@ -45,9 +45,15 @@ void handle_upload(void *arg) {
     
     User *user = get_user(data->user_manager, data->username);
     if (!user) {
-        send(data->client_socket, "ERROR: User not found\n", 22, 0);
+        response_queue_enqueue(data->response_queue, data->client_socket, "ERROR: User not found\n", 22);
+        free(data);
         return;
     }
+    
+    file_lock_acquire(data->lock_manager, data->username, data->filename);
+
+    printf("DEBUG: UPLOAD acquired lock for %s. Sleeping for 5 seconds...\n", data->filename);
+    sleep(5);
     
     pthread_mutex_lock(&user->lock);
     
@@ -55,11 +61,21 @@ void handle_upload(void *arg) {
     if (stat(data->local_path, &st) == 0) {
         if (user->used_quota + st.st_size > user->quota) {
             pthread_mutex_unlock(&user->lock);
-            send(data->client_socket, "ERROR: Quota exceeded\n", 22, 0);
+            file_lock_release(data->lock_manager, data->username, data->filename);
+            response_queue_enqueue(data->response_queue, data->client_socket, "ERROR: Quota exceeded\n", 22);
+            free(data);
             return;
         }
+    } else {
+        pthread_mutex_unlock(&user->lock);
+        file_lock_release(data->lock_manager, data->username, data->filename);
+        response_queue_enqueue(data->response_queue, data->client_socket, "ERROR: Local file not found on server\n", 37);
+        free(data);
+        return;
     }
     
+    pthread_mutex_unlock(&user->lock); 
+
     ensure_user_dir(data->username);
     char *server_path = get_file_path(data->username, data->filename);
     
@@ -69,8 +85,9 @@ void handle_upload(void *arg) {
     if (!src || !dst) {
         if (src) fclose(src);
         if (dst) fclose(dst);
-        pthread_mutex_unlock(&user->lock);
-        send(data->client_socket, "ERROR: File operation failed\n", 29, 0);
+        file_lock_release(data->lock_manager, data->username, data->filename);
+        response_queue_enqueue(data->response_queue, data->client_socket, "ERROR: File operation failed\n", 29);
+        free(data);
         return;
     }
     
@@ -85,40 +102,76 @@ void handle_upload(void *arg) {
     fclose(src);
     fclose(dst);
     
+    pthread_mutex_lock(&user->lock);
     add_file_to_user(user, data->filename, total_bytes);
     user->used_quota += total_bytes;
-    
     pthread_mutex_unlock(&user->lock);
     
-    char response[256];
+    file_lock_release(data->lock_manager, data->username, data->filename);
+    
+    char response[512];
     snprintf(response, sizeof(response), "OK: Uploaded %s (%zu bytes)\n", 
              data->filename, total_bytes);
-    send(data->client_socket, response, strlen(response), 0);
+    response_queue_enqueue(data->response_queue, data->client_socket, response, (int)strlen(response));
+    free(data);
 }
 
 void handle_download(void *arg) {
     TaskData *data = (TaskData*)arg;
     if (!data) return;
     
+    User *user = get_user(data->user_manager, data->username);
+    if (!user) {
+        response_queue_enqueue(data->response_queue, data->client_socket, "ERROR: User not found\n", 22);
+        free(data);
+        return;
+    }
+
+    file_lock_acquire(data->lock_manager, data->username, data->filename);
+    pthread_mutex_lock(&user->lock);
+
     char *server_path = get_file_path(data->username, data->filename);
     
-    FILE *file = fopen(server_path, "rb");
-    if (!file) {
-        send(data->client_socket, "ERROR: File not found\n", 22, 0);
+    int file_exists_in_meta = 0;
+    for (int i = 0; i < user->file_count; i++) {
+        if (strcmp(user->files[i].name, data->filename) == 0) {
+            file_exists_in_meta = 1;
+            break;
+        }
+    }
+    
+    if (!file_exists_in_meta) {
+        pthread_mutex_unlock(&user->lock);
+        file_lock_release(data->lock_manager, data->username, data->filename);
+        response_queue_enqueue(data->response_queue, data->client_socket, "ERROR: File not found in user metadata\n", 38);
+        free(data);
         return;
     }
     
-    send(data->client_socket, "FILE_CONTENT\n", 13, 0);
+    pthread_mutex_unlock(&user->lock);
+
+    FILE *file = fopen(server_path, "rb");
+    if (!file) {
+        file_lock_release(data->lock_manager, data->username, data->filename);
+        response_queue_enqueue(data->response_queue, data->client_socket, "ERROR: File not found on disk\n", 29);
+        free(data);
+        return;
+    }
+    
+    response_queue_enqueue(data->response_queue, data->client_socket, "FILE_CONTENT\n", 13);
     
     char buffer[4096];
     size_t bytes;
     
     while ((bytes = fread(buffer, 1, sizeof(buffer), file)) > 0) {
-        send(data->client_socket, buffer, bytes, 0);
+        response_queue_enqueue(data->response_queue, data->client_socket, buffer, (int)bytes);
     }
     
     fclose(file);
-    send(data->client_socket, "END_FILE\n", 9, 0);
+    response_queue_enqueue(data->response_queue, data->client_socket, "END_FILE\n", 9);
+    
+    file_lock_release(data->lock_manager, data->username, data->filename);
+    free(data);
 }
 
 void handle_delete(void *arg) {
@@ -127,15 +180,18 @@ void handle_delete(void *arg) {
     
     User *user = get_user(data->user_manager, data->username);
     if (!user) {
-        send(data->client_socket, "ERROR: User not found\n", 22, 0);
+        response_queue_enqueue(data->response_queue, data->client_socket, "ERROR: User not found\n", 22);
+        free(data);
         return;
     }
     
+    file_lock_acquire(data->lock_manager, data->username, data->filename);
     pthread_mutex_lock(&user->lock);
     
     char *server_path = get_file_path(data->username, data->filename);
     
     if (remove(server_path) == 0) {
+
         for (int i = 0; i < user->file_count; i++) {
             if (strcmp(user->files[i].name, data->filename) == 0) {
                 user->used_quota -= user->files[i].size;
@@ -148,11 +204,14 @@ void handle_delete(void *arg) {
         }
         
         pthread_mutex_unlock(&user->lock);
-        send(data->client_socket, "OK: File deleted\n", 17, 0);
+        file_lock_release(data->lock_manager, data->username, data->filename);
+        response_queue_enqueue(data->response_queue, data->client_socket, "OK: File deleted\n", 17);
     } else {
         pthread_mutex_unlock(&user->lock);
-        send(data->client_socket, "ERROR: File not found\n", 22, 0);
+        file_lock_release(data->lock_manager, data->username, data->filename);
+        response_queue_enqueue(data->response_queue, data->client_socket, "ERROR: File not found or delete failed\n", 38);
     }
+    free(data);
 }
 
 void handle_list(void *arg) {
@@ -161,14 +220,15 @@ void handle_list(void *arg) {
     
     User *user = get_user(data->user_manager, data->username);
     if (!user) {
-        send(data->client_socket, "ERROR: User not found\n", 22, 0);
+        response_queue_enqueue(data->response_queue, data->client_socket, "ERROR: User not found\n", 22);
+        free(data);
         return;
     }
     
     pthread_mutex_lock(&user->lock);
     
     char response[4096] = "Files:\n";
-    int offset = strlen(response);
+    int offset = (int)strlen(response);
     
     for (int i = 0; i < user->file_count; i++) {
         offset += snprintf(response + offset, sizeof(response) - offset,
@@ -182,10 +242,19 @@ void handle_list(void *arg) {
     
     pthread_mutex_unlock(&user->lock);
     
-    send(data->client_socket, response, strlen(response), 0);
+    response_queue_enqueue(data->response_queue, data->client_socket, response, (int)strlen(response));
+    free(data);
 }
 
 int add_file_to_user(User *user, const char *filename, size_t size) {
+    for(int i = 0; i < user->file_count; i++) {
+        if(strcmp(user->files[i].name, filename) == 0) {
+            user->used_quota -= user->files[i].size;
+            user->files[i].size = size;
+            return 0;
+        }
+    }
+
     if (user->file_count >= MAX_FILES) return -1;
     
     strncpy(user->files[user->file_count].name, filename, MAX_FILENAME_LEN - 1);
