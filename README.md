@@ -56,3 +56,4 @@ This test demonstrates the per-file locking mechanism.
     In Terminal B (quickly): DELETE my_file.txt
 
 Expected Result: The DELETE command in Terminal B will hang until the UPLOAD in Terminal A completes, proving the per-file lock is working. The server will not crash and not report a "DATA RACE" warning.
+
